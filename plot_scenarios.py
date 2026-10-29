@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plot annual global screen temperature, precipitation, Max MOC at 20N,
+Plot annual global screen temperature, precipitation, MOC from vmo,
 and September NH sea-ice area
 from converted RTD NetCDF files.
 
@@ -24,6 +24,9 @@ from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 from netCDF4 import Dataset, num2date
+import xarray as xr
+
+time_coder = xr.coders.CFDatetimeCoder(use_cftime=True)
 
 
 TEMP_SCENARIO_PATTERNS = {
@@ -100,6 +103,54 @@ CMIP6_PHYSICAL_SCENARIO_PATTERNS = {
         "sc_v5.1-p2-ssp585-*_nemo_physical_rtd.nc",
     ],
 }
+
+CMIP6_LABEL_TO_SCENARIO = {
+    "CMIP6 historical": "historical",
+    "SSP1-1.9": "ssp119",
+    "SSP1-2.6": "ssp126",
+    "SSP2-4.5": "ssp245",
+    "SSP4-6.0": "ssp460",
+    "SSP3-7.0": "ssp370",
+    "SSP5-8.5": "ssp585",
+}
+
+CMIP7_LABEL_TO_SCENARIO = {
+    "historical": "historical",
+    "H": "scen7-h",
+    "M": "scen7-m",
+    "VL": "scen7-vl",
+}
+
+DEFAULT_CMIP6_HIST_ROOT = "/fs/site7/eccc/crd/cccma/model_output/CMIP6/final/CMIP6/CMIP/CCCma/CanESM5-1/historical"
+DEFAULT_CMIP6_SCEN_ROOT = "/fs/site7/eccc/crd/cccma/model_output/CMIP6/final/CMIP6/ScenarioMIP/CCCma/CanESM5-1"
+DEFAULT_CMIP7_HIST_MEMBER_DIR_GLOB = (
+    "/space/hall8/sitestore/eccc/crd/cccma/users/scrd103/canesm_runs/"
+    "v51p2-c7hist-r*/data/nc_output/MIP-DRS7/CMIP7/CMIP/CCCma/CanESM5-1/"
+    "historical/r*i1p2f1"
+)
+DEFAULT_CMIP7_SCEN7H_MEMBER_DIR_GLOB = (
+    "/space/hall8/sitestore/eccc/crd/cccma/users/scrd103/canesm_runs/"
+    "v51p2-c7scen7h-r*/data/nc_output/MIP-DRS7/CMIP7/ScenarioMIP/CCCma/CanESM5-1/"
+    "scen7-h/r*i1p2f1"
+)
+DEFAULT_CMIP7_SCEN7M_MEMBER_DIR_GLOB = (
+    "/space/hall8/sitestore/eccc/crd/cccma/users/scrd103/canesm_runs/"
+    "v51p2-c7scen7m-r*/data/nc_output/MIP-DRS7/CMIP7/ScenarioMIP/CCCma/CanESM5-1/"
+    "scen7-m/r*i1p2f1"
+)
+DEFAULT_CMIP7_SCEN7VL_MEMBER_DIR_GLOB = (
+    "/space/hall8/sitestore/eccc/crd/cccma/users/scrd103/canesm_runs/"
+    "v51p2-c7scen7vl-r*/data/nc_output/MIP-DRS7/CMIP7/ScenarioMIP/CCCma/CanESM5-1/"
+    "scen7-vl/r*i1p2f1"
+)
+CMIP6_EXTRA_SCEN_DIR_GLOBS = {
+    scenario: (
+        f"/home/scrd103/site8/canesm_runs/v51p2-c6s{tag}-r*/data/nc_output/"
+        f"CMIP6/ScenarioMIP/CCCma/CanESM5-1/{scenario}"
+    )
+    for scenario, tag in (("ssp119", "119"), ("ssp126", "126"), ("ssp460", "460"))
+}
+CMIP6_EXTRA_HIST_DIR_GLOBS = "/home/scrd106/model_output/canesm-5.1/reference/CCCma/CCCma/CanESM5-v5.1-p2-histens-*/historical/"
 
 CMIP6_TEMP_SCENARIO_PATTERNS = {
     "CMIP6 historical": [
@@ -273,36 +324,6 @@ def read_september_area_nh_series(nc_path: str) -> Tuple[np.ndarray, np.ndarray]
     return unique_years, annual_sep_vals
 
 
-def read_mocmax20n_series(nc_path: str) -> Tuple[np.ndarray, np.ndarray]:
-    with Dataset(nc_path, mode="r") as ds:
-        if "mocmax20n" not in ds.variables:
-            raise KeyError(f"mocmax20n variable not found in {nc_path}")
-        if "time" not in ds.variables:
-            raise KeyError(f"time variable not found in {nc_path}")
-
-        time_var = ds.variables["time"]
-        moc = np.array(ds.variables["mocmax20n"][:]).squeeze().astype(float)
-
-        fill_value = getattr(ds.variables["mocmax20n"], "_FillValue", None)
-        if fill_value is not None:
-            moc = np.where(moc == fill_value, np.nan, moc)
-
-        missing_value = getattr(ds.variables["mocmax20n"], "missing_value", None)
-        if missing_value is not None:
-            moc = np.where(moc == missing_value, np.nan, moc)
-
-        units = getattr(time_var, "units", None)
-        calendar = getattr(time_var, "calendar", "standard")
-        if units is None:
-            raise KeyError(f"time units attribute not found in {nc_path}")
-
-        time_vals = np.array(time_var[:]).squeeze()
-        dates = num2date(time_vals, units=units, calendar=calendar)
-
-    years = np.array([d.year for d in dates], dtype=int)
-    return to_annual_series(years, moc)
-
-
 def scenario_mean(members: Dict[str, Tuple[np.ndarray, np.ndarray]]) -> Tuple[np.ndarray, np.ndarray]:
     if not members:
         return np.array([]), np.array([])
@@ -432,6 +453,44 @@ def series_against_reference(
     return aligned_ref[valid], aligned_values[valid]
 
 
+def years_and_series_against_reference(
+    years: np.ndarray,
+    values: np.ndarray,
+    ref_years: np.ndarray,
+    ref_values: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    common_years, aligned_values, aligned_ref = align_series_on_years(years, values, ref_years, ref_values)
+    valid = np.isfinite(aligned_values) & np.isfinite(aligned_ref)
+    return common_years[valid], aligned_ref[valid], aligned_values[valid]
+
+
+def change_at_latest_warming_crossing(
+    years: np.ndarray,
+    gsat: np.ndarray,
+    values: np.ndarray,
+    level: float,
+    direction: str = "up",
+) -> Tuple[float, float]:
+    """Return (crossing year, value) at the latest crossing of `level`, linearly interpolated.
+
+    `direction` is "up" for rising through the level or "down" for falling through it.
+    """
+    order = np.argsort(years)
+    years, gsat, values = years[order], gsat[order], values[order]
+    if direction == "up":
+        crossings = np.where((gsat[:-1] < level) & (gsat[1:] >= level))[0]
+    else:
+        crossings = np.where((gsat[:-1] >= level) & (gsat[1:] < level))[0]
+    if crossings.size == 0:
+        return np.nan, np.nan
+    i = crossings[-1]
+    frac = (level - gsat[i]) / (gsat[i + 1] - gsat[i])
+    return (
+        years[i] + frac * (years[i + 1] - years[i]),
+        values[i] + frac * (values[i + 1] - values[i]),
+    )
+
+
 def set_robust_ylim(
     ax: plt.Axes,
     series_collection: List[Tuple[np.ndarray, np.ndarray]],
@@ -511,6 +570,125 @@ def collect_cmip6_physical_files_by_scenario(input_dir: str) -> Dict[str, List[s
             matched.extend(glob.glob(os.path.join(input_dir, pattern)))
         files_by_scenario[scenario] = sorted(set(matched), key=natural_member_key)[:MAX_ENSEMBLE_SIZE]
     return files_by_scenario
+
+
+def discover_cmip6_cmor_files(
+    cmip6_hist_root: str,
+    cmip6_scen_root: str,
+    scenario: str,
+    grid: str,
+    variable: str,
+) -> Dict[str, List[str]]:
+    base_dirs = [cmip6_hist_root] if scenario == "historical" else [
+        os.path.join(cmip6_scen_root, scenario)
+    ]
+    if scenario == "historical":
+        base_dirs.extend(sorted(glob.glob(CMIP6_EXTRA_HIST_DIR_GLOBS)))
+    else:
+        extra_glob = CMIP6_EXTRA_SCEN_DIR_GLOBS.get(scenario)
+        if extra_glob:
+            base_dirs.extend(sorted(glob.glob(extra_glob)))
+
+    member_dirs: List[str] = []
+    for base_dir in base_dirs:
+        member_dirs.extend(sorted(glob.glob(os.path.join(base_dir, "r*i1p2f*"))))
+
+    files_by_member: Dict[str, List[str]] = {}
+    for member_dir in member_dirs:
+        member = os.path.basename(member_dir)
+        version_dirs = sorted(glob.glob(os.path.join(member_dir, "Omon", variable, grid, "v*")))
+        if not version_dirs:
+            continue
+        latest_version = version_dirs[-1]
+        pattern = f"{variable}_Omon_*_{scenario}_{member}_{grid}_*.nc"
+        files = sorted(glob.glob(os.path.join(latest_version, pattern)))
+        if files:
+            files_by_member[member] = files
+    return files_by_member
+
+
+def discover_cmip7_cmor_files(
+    member_dir_glob: str,
+    scenario: str,
+    model: str,
+    variable: str,
+) -> Dict[str, List[str]]:
+    files_by_member: Dict[str, List[str]] = {}
+    for member_dir in sorted(glob.glob(member_dir_glob)):
+        if not os.path.isdir(member_dir):
+            continue
+        matches = []
+        for nc_file in sorted(glob.glob(os.path.join(member_dir, "**", "*.nc"), recursive=True)):
+            name = os.path.basename(nc_file)
+            if not name.startswith(variable + "_") or "_mon_" not in name:
+                continue
+            if model not in name or f"_{scenario}_" not in name:
+                continue
+            if re.search(rf"_{re.escape(scenario)}_(r\d+i\d+p\d+f\d+)_", name):
+                matches.append(nc_file)
+        if matches:
+            member_match = re.search(
+                rf"_{re.escape(scenario)}_(r\d+i\d+p\d+f\d+)_",
+                os.path.basename(matches[0]),
+            )
+            if member_match:
+                files_by_member[member_match.group(1)] = matches
+    return files_by_member
+
+
+def member_id_from_path(path: str) -> Optional[str]:
+    """Take a physical RTD path and return the member ID in the form `r#i1p2f1`,
+    which is a key in the CMOR vmo file dictionaries.
+    """
+    filename = os.path.basename(path)
+    match = re.search(r"^sc_[a-zA-Z0-9-.]+?(\d{1,2})_\d{6}_\d{6}_nemo_physical_rtd.nc", filename)
+    if match:
+        member_number = int(match.group(1))  # int() to strip leading 0's
+        return f"r{member_number}i1p2f1"
+    return None
+
+
+def matching_cmor_files(files_by_member: Dict[str, List[str]], physical_path: str) -> List[str]:
+    physical_member = member_id_from_path(physical_path)
+    if physical_member is None:
+        raise ValueError(f"Could not identify ensemble member in {physical_path}")
+    if physical_member in files_by_member:
+        return files_by_member[physical_member]
+    raise FileNotFoundError(
+        f"No cmor files found for ensemble member {physical_member} from {physical_path}"
+    )
+
+
+def read_moc_from_vmo_files(paths: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    vmo = xr.open_mfdataset(
+        paths,
+        decode_times=time_coder,
+        concat_dim="time",
+        combine="nested",
+        data_vars=["vmo"],
+        compat="override",
+        coords="minimal",
+        combine_attrs="override",
+        drop_variables=["time_bnds", "lev_bnds", "vertices_latitude", "vertices_longitude"],
+    )["vmo"]
+    return moc_from_vmo(vmo)
+
+
+def moc_from_vmo(vmo: xr.DataArray) -> Tuple[np.ndarray, np.ndarray]:
+    """Annual maximum Atlantic overturning streamfunction (Sv) from vmo (time, lev, j, i) [kg/s]."""
+    j = 188  # In Atlantic, mean latitude is 26.495161056518555
+    ii = slice(208, 274)  # Atlantic boundaries (this slice will get all ocean cells, no extra land at lev=0)
+    k = np.argmax(vmo.lev.data >= 500)  # index to first level that is 500m or deeper. k=19 for orca1
+    assert k == 19, "Expected k = 19 in moc_from_vmo. Is the grid not ORCA1?"
+    rho0 = 1035.0  # Boussinesq reference density [kg m-3]
+
+    # Cumulatively sum y-ward transport from the bottom up to level k, integrate zonally,
+    # take the minimum over depth, then convert to Sv with the sign convention applied.
+    moc = vmo.isel(j=j, i=ii, lev=slice(None, k - 1, -1)).cumsum(dim="lev").sum(dim="i").min(dim="lev") / (
+        -rho0 * 1e6
+    )
+    years = vmo.time.dt.year
+    return to_annual_series(years.values, moc.values)
 
 
 # --- Global warming vs cumulative diagnosed CO2 emissions (panel a of scaling figure) ---
@@ -1298,11 +1476,20 @@ def cc_plot_diagnosed_emissions(cmip6_total, cmip7_total, output: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot annual global screen temperature, precipitation, Max MOC at 20N, and September NH sea-ice area from RTD NetCDF ensembles")
+    parser = argparse.ArgumentParser(description="Plot annual global screen temperature, precipitation, MOC from vmo, and September NH sea-ice area from RTD NetCDF ensembles")
     parser.add_argument("--input-dir", default="/home/rng001/site7/rtd_nc", help="Directory containing converted atmospheric RTD NetCDF files")
     parser.add_argument("--ice-input-dir", default="/home/scrd104/rtd_browser_files/cannemo", help="Directory containing NEMO ice RTD NetCDF files")
     parser.add_argument("--output", default="/home/rng001/plots/scenarios/cmip7_scenarios_climate_response.png", help="Output PNG path")
     parser.add_argument("--scaling-output", default="/home/rng001/plots/scenarios/cmip7_scenarios_climate_response_scaling.png", help="Output PNG path for the GSAT-scaled figure")
+    parser.add_argument("--gsat-output", default="/home/rng001/plots/scenarios/cmip7_scenarios_variable_changes_vs_gsat.png", help="Output PNG path for variable changes against GSAT change")
+    parser.add_argument("--cmip6-hist-root", default=DEFAULT_CMIP6_HIST_ROOT, help="CMIP6 historical data root for vmo files")
+    parser.add_argument("--cmip6-scen-root", default=DEFAULT_CMIP6_SCEN_ROOT, help="CMIP6 scenario data root for vmo files")
+    parser.add_argument("--cmip7-hist-member-dir-glob", default=DEFAULT_CMIP7_HIST_MEMBER_DIR_GLOB, help="CMIP7 historical member directories for CMOR files")
+    parser.add_argument("--cmip7-scen7h-member-dir-glob", default=DEFAULT_CMIP7_SCEN7H_MEMBER_DIR_GLOB, help="CMIP7 scen7-h member directories for CMOR files")
+    parser.add_argument("--cmip7-scen7m-member-dir-glob", default=DEFAULT_CMIP7_SCEN7M_MEMBER_DIR_GLOB, help="CMIP7 scen7-m member directories for CMOR files")
+    parser.add_argument("--cmip7-scen7vl-member-dir-glob", default=DEFAULT_CMIP7_SCEN7VL_MEMBER_DIR_GLOB, help="CMIP7 scen7-vl member directories for CMOR files")
+    parser.add_argument("--model", default="CanESM5-1", help="CMIP model name used when locating CMOR files")
+    parser.add_argument("--grid", default="gn", help="CMIP6 grid label used when locating CMOR files")
     parser.add_argument("--branch-times-csv", default=CC_DEFAULT_BRANCH_TIMES_CSV, help="CSV of historical member piControl branch times")
     parser.add_argument("--cmip6-picontrol", default=CC_DEFAULT_CMIP6_PICONTROL, help="CMIP6 piControl RTD NetCDF file")
     parser.add_argument("--cmip7-picontrol", default=CC_DEFAULT_CMIP7_PICONTROL, help="CMIP7 piControl RTD NetCDF file")
@@ -1314,6 +1501,21 @@ def main() -> None:
     temp_files_by_scenario = collect_files(args.input_dir, TEMP_SCENARIO_PATTERNS)
     ice_files_by_scenario = collect_files(args.ice_input_dir, ICE_SCENARIO_PATTERNS)
     physical_files_by_scenario = collect_files(args.ice_input_dir, PHYSICAL_SCENARIO_PATTERNS)
+    cmip7_cmor_member_dir_globs = {
+        "historical": args.cmip7_hist_member_dir_glob,
+        "H": args.cmip7_scen7h_member_dir_glob,
+        "M": args.cmip7_scen7m_member_dir_glob,
+        "VL": args.cmip7_scen7vl_member_dir_glob,
+    }
+    cmip7_vmo_files_by_scenario = {
+        scenario: discover_cmip7_cmor_files(
+            cmip7_cmor_member_dir_globs[scenario],
+            CMIP7_LABEL_TO_SCENARIO[scenario],
+            args.model,
+            "vmo",
+        )
+        for scenario in CMIP7_LABEL_TO_SCENARIO
+    }
 
     n_found = sum(len(v) for v in temp_files_by_scenario.values())
     if n_found == 0:
@@ -1376,7 +1578,9 @@ def main() -> None:
             fname = os.path.basename(path)
             member_id_match = re.search(r"(r\d+)", fname)
             member_id = member_id_match.group(1) if member_id_match else fname
-            years, vals = read_mocmax20n_series(path)
+            vmo_paths = matching_cmor_files(cmip7_vmo_files_by_scenario[scenario], path)
+            print(f"Using vmo for AMOC in {scenario}, {path}")
+            years, vals = read_moc_from_vmo_files(vmo_paths)
             scenario_moc_members[scenario][member_id] = (years, vals)
 
     scenario_temp_anom_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {}
@@ -1406,6 +1610,16 @@ def main() -> None:
     cmip6_ice_files_by_scenario = collect_cmip6_ice_files_by_scenario(args.ice_input_dir)
     cmip6_temp_files_by_scenario = collect_cmip6_temp_files_by_scenario(args.input_dir)
     cmip6_physical_files_by_scenario = collect_cmip6_physical_files_by_scenario(args.ice_input_dir)
+    cmip6_vmo_files_by_scenario = {
+        label: discover_cmip6_cmor_files(
+            args.cmip6_hist_root,
+            args.cmip6_scen_root,
+            cmip_scenario,
+            args.grid,
+            "vmo",
+        )
+        for label, cmip_scenario in CMIP6_LABEL_TO_SCENARIO.items()
+    }
 
     cmip6_temp_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {
         scenario: {} for scenario in CMIP6_TEMP_SCENARIO_PATTERNS
@@ -1434,9 +1648,14 @@ def main() -> None:
             cmip6_ice_members[scenario][member_key] = (years, vals)
 
     for scenario, paths in cmip6_physical_files_by_scenario.items():
+        if scenario in ("SSP2-4.5", "SSP3-7.0", "SSP5-8.5"):
+            # Skip scenarios without a full set of vmo ensemble members, as in plot_scenarios_vmo.py
+            continue
         for path in paths:
             member_key = os.path.basename(path).replace("_nemo_physical_rtd.nc", "")
-            years, vals = read_mocmax20n_series(path)
+            vmo_paths = matching_cmor_files(cmip6_vmo_files_by_scenario[scenario], path)
+            print(f"Using vmo for AMOC in {scenario}, {path}")
+            years, vals = read_moc_from_vmo_files(vmo_paths)
             cmip6_moc_members[scenario][member_key] = (years, vals)
 
     cmip6_temp_anom_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {}
@@ -1799,6 +2018,96 @@ def main() -> None:
     plt.close(fig_ratio)
 
     print(f"Saved GSAT-scaled plot to {ratio_output}")
+
+    gsat_output = args.gsat_output
+    fig_gsat, axes_gsat = plt.subplots(3, 1, figsize=(6.5, 12.0), sharex=True)
+    variable_specs = [
+        ("a) Precipitation change", "mm/year", scenario_precip_display, cmip6_precip_display, 365.0),
+        ("b) Overturning circulation change", "Sv", scenario_moc_display, cmip6_moc_display, 1.0),
+        ("c) September NH sea-ice area change", "million km²", scenario_ice_display, cmip6_ice_display, 1.0),
+    ]
+
+    for ax, (title, ylabel, cmip7_values, cmip6_values, scale) in zip(axes_gsat, variable_specs):
+        for scenario in scenario_order:
+            if scenario not in cmip7_values or scenario not in scenario_temp_display:
+                continue
+            temp_years, temp_vals = scenario_temp_display[scenario]
+            value_years, values = cmip7_values[scenario]
+            _, gsat_change, variable_change = years_and_series_against_reference(
+                value_years, values, temp_years, temp_vals
+            )
+            ax.plot(
+                gsat_change,
+                variable_change * scale,
+                color="black" if scenario == "historical" else SCENARIO_COLORS[scenario],
+                linewidth=3.0,
+                label="CMIP7 historical" if scenario == "historical" else scenario,
+                zorder=3,
+            )
+
+        for scenario in cmip6_order:
+            if scenario not in cmip6_values or scenario not in cmip6_temp_display:
+                continue
+            temp_years, temp_vals = cmip6_temp_display[scenario]
+            value_years, values = cmip6_values[scenario]
+            years, gsat_change, variable_change = years_and_series_against_reference(
+                value_years, values, temp_years, temp_vals
+            )
+            period = years < 2015 if scenario == "CMIP6 historical" else years > 2015
+            if not np.any(period):
+                continue
+            ax.plot(
+                gsat_change[period],
+                variable_change[period] * scale,
+                color=CMIP6_ICE_SCENARIO_GREYS[scenario],
+                linewidth=2.6,
+                label=scenario,
+                zorder=1.5,
+            )
+
+        ax.set_title(title, loc="left")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+
+    axes_gsat[-1].set_xlabel("Global mean warming (°C)")
+    handles, labels = axes_gsat[0].get_legend_handles_labels()
+    fig_gsat.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
+    fig_gsat.tight_layout(rect=(0, 0.08, 1, 1), pad=1.0)
+    gsat_dir = os.path.dirname(gsat_output)
+    if gsat_dir:
+        os.makedirs(gsat_dir, exist_ok=True)
+    fig_gsat.savefig(gsat_output, dpi=180)
+    plt.close(fig_gsat)
+
+    print(f"Saved variable changes against GSAT change plot to {gsat_output}")
+
+    warming_level = 2.0
+    print(f"\nChange in global mean precipitation at {warming_level:g}°C global warming (latest rising crossing, plus latest descending crossing where one exists):")
+    crossing_sets = [
+        (scenario_order, scenario_temp_display, scenario_precip_display, lambda s: "CMIP7 historical" if s == "historical" else f"CMIP7 {s}"),
+        (cmip6_order, cmip6_temp_display, cmip6_precip_display, lambda s: s),
+    ]
+    for order, temp_display, precip_display, name in crossing_sets:
+        for scenario in order:
+            if scenario not in temp_display or scenario not in precip_display:
+                continue
+            temp_years, temp_vals = temp_display[scenario]
+            precip_years, precip_vals = precip_display[scenario]
+            years, gsat_change, precip_change = years_and_series_against_reference(
+                precip_years, precip_vals, temp_years, temp_vals
+            )
+            cross_year, cross_precip = change_at_latest_warming_crossing(
+                years, gsat_change, precip_change * 365.0, warming_level
+            )
+            if np.isnan(cross_year):
+                print(f"  {name(scenario)}: {warming_level:g}°C not reached")
+            else:
+                print(f"  {name(scenario)}: {cross_precip:+.1f} mm/year (crossing at {cross_year:.1f})")
+            down_year, down_precip = change_at_latest_warming_crossing(
+                years, gsat_change, precip_change * 365.0, warming_level, direction="down"
+            )
+            if not np.isnan(down_year):
+                print(f"  {name(scenario)} (descending): {down_precip:+.1f} mm/year (crossing at {down_year:.1f})")
 
     cc_write_cumulative_emissions_summary(
         args.cumulative_summary,
