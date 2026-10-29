@@ -90,17 +90,17 @@ CMIP6_PHYSICAL_SCENARIO_PATTERNS = {
         "sc_v51p2-c6s126-r*_201501_210012_nemo_physical_rtd.nc",
     ],
     "SSP2-4.5": [
-        "sc_v5.1.p2-s245-*_nemo_physical_rtd.nc",
+        "sc_v5.1.p2-s245-[0-9][0-9]_*_nemo_physical_rtd.nc",
     ],
     "SSP4-6.0": [
         "sc_v5.1.p2-s460-*_nemo_physical_rtd.nc",
         "sc_v51p2-c6s460-r*_201501_210012_nemo_physical_rtd.nc",
     ],
     "SSP3-7.0": [
-        "sc_v5.1.p2-s370-*_nemo_physical_rtd.nc",
+        "sc_v5.1.p2-s370-[0-9][0-9]_*_nemo_physical_rtd.nc",
     ],
     "SSP5-8.5": [
-        "sc_v5.1-p2-ssp585-*_nemo_physical_rtd.nc",
+        "sc_v5.1-p2-ssp585-[0-9][0-9]_*_nemo_physical_rtd.nc",
     ],
 }
 
@@ -143,6 +143,8 @@ DEFAULT_CMIP7_SCEN7VL_MEMBER_DIR_GLOB = (
     "v51p2-c7scen7vl-r*/data/nc_output/MIP-DRS7/CMIP7/ScenarioMIP/CCCma/CanESM5-1/"
     "scen7-vl/r*i1p2f1"
 )
+DEFAULT_CMIP6_VMO_EXTRA_ROOT = "/fs/site7/eccc/crd/cccma/users/ncs001/v51_ssp-vmo-02-10"
+CMIP6_VMO_EXTRA_SCENARIOS = ("ssp245", "ssp370")
 CMIP6_EXTRA_SCEN_DIR_GLOBS = {
     scenario: (
         f"/home/scrd103/site8/canesm_runs/v51p2-c6s{tag}-r*/data/nc_output/"
@@ -578,10 +580,17 @@ def discover_cmip6_cmor_files(
     scenario: str,
     grid: str,
     variable: str,
+    extra_root: Optional[str] = None,
 ) -> Dict[str, List[str]]:
     base_dirs = [cmip6_hist_root] if scenario == "historical" else [
         os.path.join(cmip6_scen_root, scenario)
     ]
+    # Members 2-10 of these scenarios live in per-run directories under `extra_root`.
+    extra_member_dirs: List[str] = []
+    if extra_root and scenario in CMIP6_VMO_EXTRA_SCENARIOS:
+        for run_dir in sorted(glob.glob(os.path.join(extra_root, "v5.1*"))):
+            scenario_dir = os.path.join(run_dir, "nc_output", "CMIP6", "ScenarioMIP", "CCCma", "CanESM5-1", scenario)
+            extra_member_dirs.extend(sorted(glob.glob(os.path.join(scenario_dir, "r*i1p2f*"))))
     if scenario == "historical":
         base_dirs.extend(sorted(glob.glob(CMIP6_EXTRA_HIST_DIR_GLOBS)))
     else:
@@ -592,6 +601,7 @@ def discover_cmip6_cmor_files(
     member_dirs: List[str] = []
     for base_dir in base_dirs:
         member_dirs.extend(sorted(glob.glob(os.path.join(base_dir, "r*i1p2f*"))))
+    member_dirs.extend(extra_member_dirs)
 
     files_by_member: Dict[str, List[str]] = {}
     for member_dir in member_dirs:
@@ -1333,9 +1343,11 @@ def cc_plot_temp_vs_emissions(ax, data: dict, short_labels: bool = False) -> Non
 
 
 CC_XLIM = (2000, 2100)
-CC_SUMMARY_START_YEAR = 2081
+CC_SUMMARY_START_YEAR = 2100
 CC_SUMMARY_END_YEAR = 2100
-CC_DEFAULT_CUMULATIVE_SUMMARY = "/home/rng001/plots/scenarios/cmip7_cmip6_cumulative_co2_emissions_2081-2100.csv"
+CC_WARMING_START_YEAR = 2081
+CC_WARMING_END_YEAR = 2100
+CC_DEFAULT_CUMULATIVE_SUMMARY = "/home/rng001/plots/scenarios/cmip7_cmip6_cumulative_co2_emissions_2100.csv"
 
 
 def cc_write_cumulative_emissions_summary(
@@ -1362,9 +1374,9 @@ def cc_write_cumulative_emissions_summary(
                 "included_period_start_year",
                 "included_period_end_year",
                 "years_included",
-                "mean_diagnosed_cumulative_co2_emissions_anomaly_pg_c",
+                "diagnosed_cumulative_co2_emissions_anomaly_pg_c",
                 "members_included",
-                "mean_global_warming_relative_to_1850_1900_degc",
+                "mean_global_warming_2081_2100_relative_to_1850_1900_degc",
             )
         )
         for family, scenarios in (("CMIP6", cmip6_members), ("CMIP7", cmip7_members)):
@@ -1394,8 +1406,8 @@ def cc_write_cumulative_emissions_summary(
                     scenario, (np.array([], dtype=int), np.array([], dtype=float))
                 )
                 warming_mask = (
-                    (np.asarray(warming_years) >= CC_SUMMARY_START_YEAR)
-                    & (np.asarray(warming_years) <= CC_SUMMARY_END_YEAR)
+                    (np.asarray(warming_years) >= CC_WARMING_START_YEAR)
+                    & (np.asarray(warming_years) <= CC_WARMING_END_YEAR)
                     & np.isfinite(warming_vals)
                 )
                 mean_warming = float(np.mean(np.asarray(warming_vals)[warming_mask])) if np.any(warming_mask) else ""
@@ -1484,6 +1496,7 @@ def main() -> None:
     parser.add_argument("--gsat-output", default="/home/rng001/plots/scenarios/cmip7_scenarios_variable_changes_vs_gsat.png", help="Output PNG path for variable changes against GSAT change")
     parser.add_argument("--cmip6-hist-root", default=DEFAULT_CMIP6_HIST_ROOT, help="CMIP6 historical data root for vmo files")
     parser.add_argument("--cmip6-scen-root", default=DEFAULT_CMIP6_SCEN_ROOT, help="CMIP6 scenario data root for vmo files")
+    parser.add_argument("--cmip6-vmo-extra-root", default=DEFAULT_CMIP6_VMO_EXTRA_ROOT, help="Directory with additional CMIP6 ssp245/ssp370 vmo ensemble members (members 2-10)")
     parser.add_argument("--cmip7-hist-member-dir-glob", default=DEFAULT_CMIP7_HIST_MEMBER_DIR_GLOB, help="CMIP7 historical member directories for CMOR files")
     parser.add_argument("--cmip7-scen7h-member-dir-glob", default=DEFAULT_CMIP7_SCEN7H_MEMBER_DIR_GLOB, help="CMIP7 scen7-h member directories for CMOR files")
     parser.add_argument("--cmip7-scen7m-member-dir-glob", default=DEFAULT_CMIP7_SCEN7M_MEMBER_DIR_GLOB, help="CMIP7 scen7-m member directories for CMOR files")
@@ -1495,7 +1508,7 @@ def main() -> None:
     parser.add_argument("--cmip7-picontrol", default=CC_DEFAULT_CMIP7_PICONTROL, help="CMIP7 piControl RTD NetCDF file")
     parser.add_argument("--components-output", default="/home/rng001/plots/scenarios/cmip7_cmip6_co2_budget_components.png", help="Output PNG path for the four-panel carbon budget component plot")
     parser.add_argument("--diagnosed-output", default="/home/rng001/plots/scenarios/cmip7_cmip6_diagnosed_cumulative_co2_emissions.png", help="Output PNG path for the diagnosed cumulative CO2 emissions plot")
-    parser.add_argument("--cumulative-summary", default=CC_DEFAULT_CUMULATIVE_SUMMARY, help="CSV output for mean cumulative CO2 emissions in 2081-2100")
+    parser.add_argument("--cumulative-summary", default=CC_DEFAULT_CUMULATIVE_SUMMARY, help="CSV output for cumulative CO2 emissions in 2100")
     args = parser.parse_args()
 
     temp_files_by_scenario = collect_files(args.input_dir, TEMP_SCENARIO_PATTERNS)
@@ -1617,8 +1630,10 @@ def main() -> None:
             cmip_scenario,
             args.grid,
             "vmo",
+            extra_root=args.cmip6_vmo_extra_root,
         )
         for label, cmip_scenario in CMIP6_LABEL_TO_SCENARIO.items()
+        if label != "SSP5-8.5"
     }
 
     cmip6_temp_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {
@@ -1648,14 +1663,23 @@ def main() -> None:
             cmip6_ice_members[scenario][member_key] = (years, vals)
 
     for scenario, paths in cmip6_physical_files_by_scenario.items():
-        if scenario in ("SSP2-4.5", "SSP3-7.0", "SSP5-8.5"):
-            # Skip scenarios without a full set of vmo ensemble members, as in plot_scenarios_vmo.py
+        if scenario == "SSP5-8.5":
+            # SSP5-8.5 is omitted from the AMOC plots
             continue
         for path in paths:
             member_key = os.path.basename(path).replace("_nemo_physical_rtd.nc", "")
-            vmo_paths = matching_cmor_files(cmip6_vmo_files_by_scenario[scenario], path)
+            try:
+                vmo_paths = matching_cmor_files(cmip6_vmo_files_by_scenario[scenario], path)
+            except FileNotFoundError as err:
+                print(f"Skipping AMOC member: {err}")
+                continue
             print(f"Using vmo for AMOC in {scenario}, {path}")
             years, vals = read_moc_from_vmo_files(vmo_paths)
+            if scenario != "CMIP6 historical" and (
+                years[-1] < 2100 or len(years) != years[-1] - years[0] + 1
+            ):
+                print(f"Skipping incomplete vmo record for AMOC in {scenario}, {path}: {years[0]}-{years[-1]}, {len(years)} years")
+                continue
             cmip6_moc_members[scenario][member_key] = (years, vals)
 
     cmip6_temp_anom_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {}
@@ -2116,7 +2140,7 @@ def main() -> None:
         cmip6_temp_display,
         scenario_temp_display,
     )
-    print(f"Saved 2081-2100 cumulative CO2 emissions summary to {args.cumulative_summary}")
+    print(f"Saved 2100 cumulative CO2 emissions summary to {args.cumulative_summary}")
     cc_plot_component_panels(
         temp_emissions_data["cmip6_components"], temp_emissions_data["cmip7_components"], args.components_output
     )
