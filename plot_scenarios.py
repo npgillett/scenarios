@@ -43,13 +43,6 @@ ICE_SCENARIO_PATTERNS = {
     "VL": "sc_v51p2-c7scen7vl-r*_202201_210012_nemo_ice_rtd.nc",
 }
 
-PHYSICAL_SCENARIO_PATTERNS = {
-    "historical": "sc_v51p2-c7hist-r*_185001_202112_nemo_physical_rtd.nc",
-    "H": "sc_v51p2-c7scen7h-r*_202201_210012_nemo_physical_rtd.nc",
-    "M": "sc_v51p2-c7scen7m-r*_202201_210012_nemo_physical_rtd.nc",
-    "VL": "sc_v51p2-c7scen7vl-r*_202201_210012_nemo_physical_rtd.nc",
-}
-
 CMIP6_ICE_SCENARIO_PATTERNS = {
     "CMIP6 historical": [
         "sc_v5.1-p2-histens-*_nemo_ice_rtd.nc",
@@ -74,33 +67,6 @@ CMIP6_ICE_SCENARIO_PATTERNS = {
     ],
     "SSP5-8.5": [
         "sc_v5.1-p2-ssp585-*_nemo_ice_rtd.nc",
-    ],
-}
-
-CMIP6_PHYSICAL_SCENARIO_PATTERNS = {
-    "CMIP6 historical": [
-        "sc_v5.1-p2-histens-*_nemo_physical_rtd.nc",
-    ],
-    "SSP1-1.9": [
-        "sc_v5.1.p2-s119-*_nemo_physical_rtd.nc",
-        "sc_v51p2-c6s119-r*_201501_210012_nemo_physical_rtd.nc",
-    ],
-    "SSP1-2.6": [
-        "sc_v5.1.p2-s126-*_nemo_physical_rtd.nc",
-        "sc_v51p2-c6s126-r*_201501_210012_nemo_physical_rtd.nc",
-    ],
-    "SSP2-4.5": [
-        "sc_v5.1.p2-s245-[0-9][0-9]_*_nemo_physical_rtd.nc",
-    ],
-    "SSP4-6.0": [
-        "sc_v5.1.p2-s460-*_nemo_physical_rtd.nc",
-        "sc_v51p2-c6s460-r*_201501_210012_nemo_physical_rtd.nc",
-    ],
-    "SSP3-7.0": [
-        "sc_v5.1.p2-s370-[0-9][0-9]_*_nemo_physical_rtd.nc",
-    ],
-    "SSP5-8.5": [
-        "sc_v5.1-p2-ssp585-[0-9][0-9]_*_nemo_physical_rtd.nc",
     ],
 }
 
@@ -144,7 +110,7 @@ DEFAULT_CMIP7_SCEN7VL_MEMBER_DIR_GLOB = (
     "scen7-vl/r*i1p2f1"
 )
 DEFAULT_CMIP6_VMO_EXTRA_ROOT = "/fs/site7/eccc/crd/cccma/users/ncs001/v51_ssp-vmo-02-10"
-CMIP6_VMO_EXTRA_SCENARIOS = ("ssp245", "ssp370")
+CMIP6_VMO_EXTRA_SCENARIOS = ("ssp245", "ssp370", "ssp585")
 CMIP6_EXTRA_SCEN_DIR_GLOBS = {
     scenario: (
         f"/home/scrd103/site8/canesm_runs/v51p2-c6s{tag}-r*/data/nc_output/"
@@ -564,16 +530,6 @@ def collect_cmip6_temp_files_by_scenario(input_dir: str) -> Dict[str, List[str]]
     return files_by_scenario
 
 
-def collect_cmip6_physical_files_by_scenario(input_dir: str) -> Dict[str, List[str]]:
-    files_by_scenario: Dict[str, List[str]] = {}
-    for scenario, patterns in CMIP6_PHYSICAL_SCENARIO_PATTERNS.items():
-        matched = []
-        for pattern in patterns:
-            matched.extend(glob.glob(os.path.join(input_dir, pattern)))
-        files_by_scenario[scenario] = sorted(set(matched), key=natural_member_key)[:MAX_ENSEMBLE_SIZE]
-    return files_by_scenario
-
-
 def discover_cmip6_cmor_files(
     cmip6_hist_root: str,
     cmip6_scen_root: str,
@@ -588,9 +544,10 @@ def discover_cmip6_cmor_files(
     # Members 2-10 of these scenarios live in per-run directories under `extra_root`.
     extra_member_dirs: List[str] = []
     if extra_root and scenario in CMIP6_VMO_EXTRA_SCENARIOS:
+        member_pattern = "r*i1p1f*" if scenario == "ssp585" else "r*i1p2f*"
         for run_dir in sorted(glob.glob(os.path.join(extra_root, "v5.1*"))):
             scenario_dir = os.path.join(run_dir, "nc_output", "CMIP6", "ScenarioMIP", "CCCma", "CanESM5-1", scenario)
-            extra_member_dirs.extend(sorted(glob.glob(os.path.join(scenario_dir, "r*i1p2f*"))))
+            extra_member_dirs.extend(sorted(glob.glob(os.path.join(scenario_dir, member_pattern))))
     if scenario == "historical":
         base_dirs.extend(sorted(glob.glob(CMIP6_EXTRA_HIST_DIR_GLOBS)))
     else:
@@ -598,13 +555,16 @@ def discover_cmip6_cmor_files(
         if extra_glob:
             base_dirs.extend(sorted(glob.glob(extra_glob)))
 
-    member_dirs: List[str] = []
+    member_dirs: List[Tuple[str, bool]] = []
     for base_dir in base_dirs:
-        member_dirs.extend(sorted(glob.glob(os.path.join(base_dir, "r*i1p2f*"))))
-    member_dirs.extend(extra_member_dirs)
+        member_dirs.extend(
+            (member_dir, False)
+            for member_dir in sorted(glob.glob(os.path.join(base_dir, "r*i1p2f*")))
+        )
+    member_dirs.extend((member_dir, True) for member_dir in extra_member_dirs)
 
     files_by_member: Dict[str, List[str]] = {}
-    for member_dir in member_dirs:
+    for member_dir, is_extra_member_dir in member_dirs:
         member = os.path.basename(member_dir)
         version_dirs = sorted(glob.glob(os.path.join(member_dir, "Omon", variable, grid, "v*")))
         if not version_dirs:
@@ -613,6 +573,9 @@ def discover_cmip6_cmor_files(
         pattern = f"{variable}_Omon_*_{scenario}_{member}_{grid}_*.nc"
         files = sorted(glob.glob(os.path.join(latest_version, pattern)))
         if files:
+            if scenario == "ssp585" and is_extra_member_dir:
+                # These extra SSP585 files are tagged p1 but correspond to p2 RTD members.
+                member = member.replace("i1p1f", "i1p2f")
             files_by_member[member] = files
     return files_by_member
 
@@ -644,29 +607,6 @@ def discover_cmip7_cmor_files(
             if member_match:
                 files_by_member[member_match.group(1)] = matches
     return files_by_member
-
-
-def member_id_from_path(path: str) -> Optional[str]:
-    """Take a physical RTD path and return the member ID in the form `r#i1p2f1`,
-    which is a key in the CMOR vmo file dictionaries.
-    """
-    filename = os.path.basename(path)
-    match = re.search(r"^sc_[a-zA-Z0-9-.]+?(\d{1,2})_\d{6}_\d{6}_nemo_physical_rtd.nc", filename)
-    if match:
-        member_number = int(match.group(1))  # int() to strip leading 0's
-        return f"r{member_number}i1p2f1"
-    return None
-
-
-def matching_cmor_files(files_by_member: Dict[str, List[str]], physical_path: str) -> List[str]:
-    physical_member = member_id_from_path(physical_path)
-    if physical_member is None:
-        raise ValueError(f"Could not identify ensemble member in {physical_path}")
-    if physical_member in files_by_member:
-        return files_by_member[physical_member]
-    raise FileNotFoundError(
-        f"No cmor files found for ensemble member {physical_member} from {physical_path}"
-    )
 
 
 def read_moc_from_vmo_files(paths: List[str]) -> Tuple[np.ndarray, np.ndarray]:
@@ -1496,7 +1436,7 @@ def main() -> None:
     parser.add_argument("--gsat-output", default="/home/rng001/plots/scenarios/cmip7_scenarios_variable_changes_vs_gsat.png", help="Output PNG path for variable changes against GSAT change")
     parser.add_argument("--cmip6-hist-root", default=DEFAULT_CMIP6_HIST_ROOT, help="CMIP6 historical data root for vmo files")
     parser.add_argument("--cmip6-scen-root", default=DEFAULT_CMIP6_SCEN_ROOT, help="CMIP6 scenario data root for vmo files")
-    parser.add_argument("--cmip6-vmo-extra-root", default=DEFAULT_CMIP6_VMO_EXTRA_ROOT, help="Directory with additional CMIP6 ssp245/ssp370 vmo ensemble members (members 2-10)")
+    parser.add_argument("--cmip6-vmo-extra-root", default=DEFAULT_CMIP6_VMO_EXTRA_ROOT, help="Directory with additional CMIP6 ssp245/ssp370/ssp585 vmo ensemble members")
     parser.add_argument("--cmip7-hist-member-dir-glob", default=DEFAULT_CMIP7_HIST_MEMBER_DIR_GLOB, help="CMIP7 historical member directories for CMOR files")
     parser.add_argument("--cmip7-scen7h-member-dir-glob", default=DEFAULT_CMIP7_SCEN7H_MEMBER_DIR_GLOB, help="CMIP7 scen7-h member directories for CMOR files")
     parser.add_argument("--cmip7-scen7m-member-dir-glob", default=DEFAULT_CMIP7_SCEN7M_MEMBER_DIR_GLOB, help="CMIP7 scen7-m member directories for CMOR files")
@@ -1513,7 +1453,7 @@ def main() -> None:
 
     temp_files_by_scenario = collect_files(args.input_dir, TEMP_SCENARIO_PATTERNS)
     ice_files_by_scenario = collect_files(args.ice_input_dir, ICE_SCENARIO_PATTERNS)
-    physical_files_by_scenario = collect_files(args.ice_input_dir, PHYSICAL_SCENARIO_PATTERNS)
+
     cmip7_cmor_member_dir_globs = {
         "historical": args.cmip7_hist_member_dir_glob,
         "H": args.cmip7_scen7h_member_dir_glob,
@@ -1586,13 +1526,15 @@ def main() -> None:
             years, vals = read_september_area_nh_series(path)
             scenario_ice_members[scenario][member_id] = (years, vals)
 
-    for scenario, paths in physical_files_by_scenario.items():
-        for path in paths:
-            fname = os.path.basename(path)
-            member_id_match = re.search(r"(r\d+)", fname)
-            member_id = member_id_match.group(1) if member_id_match else fname
-            vmo_paths = matching_cmor_files(cmip7_vmo_files_by_scenario[scenario], path)
-            print(f"Using vmo for AMOC in {scenario}, {path}")
+    for scenario, files_by_member in cmip7_vmo_files_by_scenario.items():
+        sorted_members = sorted(
+            files_by_member,
+            key=lambda member: (int(re.search(r"r(\d+)", member).group(1)), member),
+        )[:MAX_ENSEMBLE_SIZE]
+        for member in sorted_members:
+            member_id = re.search(r"r\d+", member).group()
+            vmo_paths = files_by_member[member]
+            print(f"Using vmo for AMOC in {scenario}, {member}")
             years, vals = read_moc_from_vmo_files(vmo_paths)
             scenario_moc_members[scenario][member_id] = (years, vals)
 
@@ -1622,7 +1564,6 @@ def main() -> None:
 
     cmip6_ice_files_by_scenario = collect_cmip6_ice_files_by_scenario(args.ice_input_dir)
     cmip6_temp_files_by_scenario = collect_cmip6_temp_files_by_scenario(args.input_dir)
-    cmip6_physical_files_by_scenario = collect_cmip6_physical_files_by_scenario(args.ice_input_dir)
     cmip6_vmo_files_by_scenario = {
         label: discover_cmip6_cmor_files(
             args.cmip6_hist_root,
@@ -1633,7 +1574,6 @@ def main() -> None:
             extra_root=args.cmip6_vmo_extra_root,
         )
         for label, cmip_scenario in CMIP6_LABEL_TO_SCENARIO.items()
-        if label != "SSP5-8.5"
     }
 
     cmip6_temp_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {
@@ -1654,7 +1594,7 @@ def main() -> None:
         scenario: {} for scenario in CMIP6_ICE_SCENARIO_PATTERNS
     }
     cmip6_moc_members: Dict[str, Dict[str, Tuple[np.ndarray, np.ndarray]]] = {
-        scenario: {} for scenario in CMIP6_PHYSICAL_SCENARIO_PATTERNS
+        scenario: {} for scenario in CMIP6_TEMP_SCENARIO_PATTERNS
     }
     for scenario, paths in cmip6_ice_files_by_scenario.items():
         for path in paths:
@@ -1662,18 +1602,14 @@ def main() -> None:
             years, vals = read_september_area_nh_series(path)
             cmip6_ice_members[scenario][member_key] = (years, vals)
 
-    for scenario, paths in cmip6_physical_files_by_scenario.items():
-        if scenario == "SSP5-8.5":
-            # SSP5-8.5 is omitted from the AMOC plots
-            continue
-        for path in paths:
-            member_key = os.path.basename(path).replace("_nemo_physical_rtd.nc", "")
-            try:
-                vmo_paths = matching_cmor_files(cmip6_vmo_files_by_scenario[scenario], path)
-            except FileNotFoundError as err:
-                print(f"Skipping AMOC member: {err}")
-                continue
-            print(f"Using vmo for AMOC in {scenario}, {path}")
+    for scenario, files_by_member in cmip6_vmo_files_by_scenario.items():
+        sorted_members = sorted(
+            files_by_member,
+            key=lambda member: (int(re.search(r"r(\d+)", member).group(1)), member),
+        )[:MAX_ENSEMBLE_SIZE]
+        for member_key in sorted_members:
+            vmo_paths = files_by_member[member_key]
+            print(f"Using vmo for AMOC in {scenario}, {member_key}")
             years, vals = read_moc_from_vmo_files(vmo_paths)
             if scenario != "CMIP6 historical" and (
                 years[-1] < 2100 or len(years) != years[-1] - years[0] + 1
